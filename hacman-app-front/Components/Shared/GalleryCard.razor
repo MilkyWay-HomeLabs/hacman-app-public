@@ -1,0 +1,136 @@
+@using hacman_app_front.Domain
+@using Microsoft.AspNetCore.WebUtilities
+@inject NavigationManager NavigationManager
+@inject IConfiguration Configuration
+
+<div class="card matrix-card">
+    <div class="matrix-img-container @(Item.IsUnlocked ? "unlocked" : "locked")" @onclick="Play">
+        <img class="card-img-top matrix-img @(Item.IsUnlocked ? "" : "locked")"
+             src="@ImageUrl"
+             alt=""
+             onerror="this.onerror=null;this.src='@FallbackImageUrl';"/>
+        @if (!Item.IsUnlocked)
+        {
+            <div class="matrix-locked-overlay">
+                <i class="bi bi-lock-fill"></i> LOCKED
+            </div>
+        }
+    </div>
+
+    <div class="card-body p-2">
+        <div class="matrix-id">#@FormatShortId(Item.Gallery.Id)</div>
+        <h6 class="card-title matrix-title @(Item.IsUnlocked ? "unlocked" : "locked")">
+            @(Item.IsUnlocked ? Item.Gallery.Title : "ACCESS_DENIED")
+        </h6>
+
+        <div class="matrix-stats mb-2">
+            @if (Item.IsUnlocked)
+            {
+                <div class="small">BEST: @FormatTime(Item.BestTimeMs)</div>
+                @if (ShowSubtype)
+                {
+                    <div class="small">SUB: @Item.Gallery.Subtype.Name</div>
+                }
+            }
+            else
+            {
+                <div class="small text-muted">UNAVAILABLE</div>
+            }
+        </div>
+
+        <div class="d-flex flex-column gap-1">
+            <div class="matrix-btn-group">
+                <button class="matrix-btn primary flex-grow-1"
+                        disabled="@(!Item.IsUnlocked)"
+                        @onclick="View">
+                    [ VIEW ]
+                </button>
+                <button class="matrix-btn success flex-grow-1"
+                        disabled="@(!Item.IsUnlocked)"
+                        @onclick="ShowScores">
+                    [ RANKINGS ]
+                </button>
+            </div>
+            <button class="matrix-btn info w-100"
+                    @onclick="Play">
+                [ PLAY ]
+            </button>
+        </div>
+    </div>
+</div>
+
+@code {
+    [Parameter, EditorRequired]
+    public UserGallery Item { get; set; } = null!;
+
+    [Parameter]
+    public bool ShowSubtype { get; set; }
+
+    private string AppBasePath => Configuration["AppBasePath"] ?? "/hacman/app";
+
+    private string ImageUrl
+    {
+        get
+        {
+            var hacmanResourcesUrl = Configuration["HacmanResourcesUrl"];
+            var id = Item.Gallery.GalleryId;
+            var idStr = id.ToString();
+            return Item.IsUnlocked
+                ? $"{hacmanResourcesUrl}/img/galleries/{idStr}/0_100.jpg"
+                : $"{hacmanResourcesUrl}/img/galleries/{idStr}/0_0.jpg";
+        }
+    }
+
+    private string FallbackImageUrl
+    {
+        get
+        {
+            var hacmanResourcesUrl = Configuration["HacmanResourcesUrl"];
+            return $"{hacmanResourcesUrl}/img/galleries/missing.jpg";
+        }
+    }
+
+    private string FormatTime(long? ms)
+    {
+        if (ms == null) return "N/A";
+        return TimeSpan.FromMilliseconds(ms.Value).ToString(@"mm\:ss");
+    }
+
+    private void View()
+    {
+        if (!Item.IsUnlocked) return;
+        var id = Item.Gallery.Id;
+        var basePath = AppBasePath.TrimEnd('/');
+        NavigationManager.NavigateTo($"{basePath}/gallery/{id}");
+    }
+
+    private void ShowScores()
+    {
+        var id = Item.Gallery.Id;
+        var basePath = AppBasePath.TrimEnd('/');
+        NavigationManager.NavigateTo($"{basePath}/scores/{id}");
+    }
+
+    private void Play()
+    {
+        var id = Item.Gallery.Id;
+        var hacmanGameUrl = Configuration["HacmanGameUrl"];
+
+        // Pass the raw title; QueryHelpers.AddQueryString URL-encodes it exactly once.
+        var queryParams = new Dictionary<string, string?>
+        {
+            { "galleryId", id.ToString() },
+            { "title", Item.Gallery.Title }
+        };
+        
+        var url = QueryHelpers.AddQueryString($"{hacmanGameUrl}/play", queryParams);
+        NavigationManager.NavigateTo(url, forceLoad: true);
+    }
+
+    private static string FormatShortId(Guid? g)
+    {
+        if (g == null || g == Guid.Empty) return "----";
+        var s = g.ToString()!;
+        return s.Length >= 8 ? s[..8] : s;
+    }
+}

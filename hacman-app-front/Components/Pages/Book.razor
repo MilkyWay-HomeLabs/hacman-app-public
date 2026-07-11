@@ -1,0 +1,11 @@
+@page "/book"
+
+<GalleryTypePage RouteSegment="book"
+                 ConfigKey="HacmanDictionary:BookGroupName"
+                 DefaultGroupName="Book"
+                 Title="Book Levels"
+                 Filter="@Filter"/>
+
+@code {
+    [SupplyParameterFromQuery] public string? Filter { get; set; }
+}

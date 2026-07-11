@@ -1,0 +1,131 @@
+name: Dev Front CI/CD
+
+on:
+  push:
+    branches: [ dev ]
+
+env:
+  FRONT_APP_DIR: ${{ secrets.HACMAN_FRONTEND_APP_DIR }}
+  FRONT_ARCHIVE_DIR: ${{ secrets.HACMAN_FRONTEND_ARCHIVE_DIR }}
+  DOCKER_USER: wolf
+  DOCKER_DIR: ${{ secrets.DOCKER_TEST_DIR }}
+  DOCKER_SERVICE: ${{ secrets.HACMAN_FRONTEND_DOCKER_SERVICE || 'hacman-app-front' }}
+  PLAYWRIGHT_BASE_URL: ${{ secrets.HACMAN_FRONTEND_PLAYWRIGHT_BASE_URL || 'http://localhost:8080' }}
+
+jobs:
+  build-deploy:
+    runs-on: [ self-hosted, Linux, X64, test ]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Determine version
+        id: version
+        run: |
+          set -euo pipefail
+          SHA=$(git rev-parse --short HEAD)
+          
+          # Extract version from backend appsettings.json
+          APP_VER=$(grep '"Version":' hacman-app-back/appsettings.json | sed -E 's/.*"Version": "(.*)".*/\1/')
+          if [ -z "$APP_VER" ]; then APP_VER="1.0.0"; fi
+          
+          if git describe --tags --exact-match >/dev/null 2>&1; then
+            VER=$(git describe --tags --exact-match)
+            FULL_VERSION="${VER}"
+          else
+            # Use version from appsettings as base
+            FULL_VERSION="${APP_VER}-sha.${SHA}"
+          fi
+          echo "FULL_VERSION=${FULL_VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Restore (solution)
+        run: dotnet restore ./hacman-app.sln
+
+      - name: Build (solution)
+        run: dotnet build ./hacman-app.sln -c Release --no-restore
+
+      - name: Publish frontend (Blazor)
+        run: |
+          set -euo pipefail
+          echo "Publishing hacman-app-front (FULL_VERSION=${{ steps.version.outputs.FULL_VERSION }})"
+          dotnet publish ./hacman-app-front/hacman-app-front.csproj -c Release -o ./publish-front -p:InformationalVersion=${{ steps.version.outputs.FULL_VERSION }}
+
+      - name: Prepare deploy directories
+        run: |
+          set -euo pipefail
+          if [ -z "${FRONT_APP_DIR}" ]; then echo "FRONT_APP_DIR is not set"; exit 1; fi
+          # Create deployment directories directly on the target machine
+          sudo mkdir -p "${FRONT_APP_DIR}/latest" "${FRONT_APP_DIR}/archive"
+          sudo chown -R ${DOCKER_USER}:${DOCKER_USER} "${FRONT_APP_DIR}/latest" "${FRONT_APP_DIR}/archive"
+
+      - name: Create archive and deploy publish
+        env:
+          FULL_VERSION: ${{ steps.version.outputs.FULL_VERSION }}
+        run: |
+          set -euo pipefail
+          echo "Listing ./publish-front before archive:" && ls -la ./publish-front || true
+          
+          # Use archive directory relative to FRONT_APP_DIR
+          ARCHIVE_DIR="${FRONT_APP_DIR}/archive"
+
+          BASE_NAME="hacman-front##${FULL_VERSION}.tar.gz"
+          TARGET="${ARCHIVE_DIR}/${BASE_NAME}"
+          SUFFIX=0
+          while [ -e "$TARGET" ]; do
+            SUFFIX=$((SUFFIX+1))
+            TARGET="${ARCHIVE_DIR}/hacman-front##${FULL_VERSION}_$SUFFIX.tar.gz"
+          done
+          tar -czf "$TARGET" -C ./publish-front .
+          echo "Archive created: $TARGET"
+          echo "Deploying to ${FRONT_APP_DIR}/latest via rsync..."
+          sudo rsync -a --delete ./publish-front/ "${FRONT_APP_DIR}/latest/"
+          sudo chown -R ${DOCKER_USER}:${DOCKER_USER} "${FRONT_APP_DIR}/latest"
+          echo "Verification of ${FRONT_APP_DIR}/latest content:"
+          sudo ls -la "${FRONT_APP_DIR}/latest"
+
+      - name: Build Docker image
+        run: |
+          set -euo pipefail
+          if [ -z "${FRONT_APP_DIR}" ]; then echo "FRONT_APP_DIR is not set"; exit 1; fi
+          TAG_VER="hacman-app-front:${{ steps.version.outputs.FULL_VERSION }}"
+          TAG_LATEST="hacman-app-front:latest"
+          # Navigate to the service folder to ensure 'latest/' is available in build context
+          cd "${FRONT_APP_DIR}"
+          docker build -t "$TAG_VER" -t "$TAG_LATEST" -f Dockerfile .
+
+      - name: Restart frontend container (docker compose)
+        run: |
+          set -euo pipefail
+          cd "${DOCKER_DIR}"
+          # We don't use --build here because we already built the image in the previous step
+          # with the correct context and tagged it as :latest
+          docker compose up -d --force-recreate ${DOCKER_SERVICE}
+
+      - name: Verify deployment
+        run: |
+          set -euo pipefail
+          echo "Waiting for frontend at ${PLAYWRIGHT_BASE_URL}..."
+          if ! timeout 60s bash -c 'until curl -k -s --fail "${PLAYWRIGHT_BASE_URL}" > /dev/null; do echo "Waiting for app..."; sleep 5; done'; then
+            echo "Frontend not available after 60s. Fetching container logs..."
+            cd "${DOCKER_DIR}"
+            docker compose logs --tail=100 ${DOCKER_SERVICE}
+            exit 1
+          fi
+          echo "Deployed: $(curl -k -s ${PLAYWRIGHT_BASE_URL})"
+
+  e2e-tests:
+    needs: build-deploy
+    runs-on: [ self-hosted, Linux, X64, test ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run E2E placeholder
+        run: |
+          echo "No E2E implemented for Blazor in this workflow. Add steps if needed."

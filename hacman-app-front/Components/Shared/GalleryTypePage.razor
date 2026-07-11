@@ -1,0 +1,151 @@
+@using Microsoft.AspNetCore.WebUtilities
+@using hacman_app_front.Domain
+@using hacman_app_front.Services
+@inject UserGalleriesState UserGalleriesState
+@inject IConfiguration Configuration
+@inject ILogger<GalleryTypePage> Logger
+@inject NavigationManager NavigationManager
+@implements IDisposable
+
+<h3>@Title</h3>
+
+@if (UserGalleriesState is null)
+{
+    <p>Loading...</p>
+}
+else
+{
+    <div class="mb-3">
+        <button class="@GetButtonClass("All")" @onclick="@(() => NavigateToFilter("All"))">
+            All (@_galleries.Count)
+        </button>
+
+        @foreach (var g in _groups)
+        {
+            <button class="@GetButtonClass(g.Key)" @onclick="@(() => NavigateToFilter(g.Key))">
+                @(g.Key) (@g.Count())
+            </button>
+        }
+    </div>
+
+    <p> Total: @_galleries.Count, unlocked: @(_galleries.Count(x => x.IsUnlocked)) </p>
+
+    @foreach (var g in (_selectedKey == "All" ? _groups : _groups.Where(g => g.Key == _selectedKey)))
+    {
+        var subtypeName = g.First().Gallery.Subtype.Name;
+
+        <section class="mb-4">
+            <h4>@subtypeName</h4>
+
+            <div class="d-flex flex-wrap gap-3">
+                @foreach (var item in g)
+                {
+                    <GalleryCard Item="item"/>
+                }
+            </div>
+        </section>
+    }
+}
+
+@code {
+    /// <summary>Route segment used to build filter/navigation URLs, e.g. "book".</summary>
+    [Parameter, EditorRequired]
+    public string RouteSegment { get; set; } = null!;
+
+    /// <summary>Configuration key holding the gallery-type group name, e.g. "HacmanDictionary:BookGroupName".</summary>
+    [Parameter, EditorRequired]
+    public string ConfigKey { get; set; } = null!;
+
+    /// <summary>Fallback group name used when <see cref="ConfigKey"/> is not configured, e.g. "Book".</summary>
+    [Parameter, EditorRequired]
+    public string DefaultGroupName { get; set; } = null!;
+
+    /// <summary>Heading text, e.g. "Book Levels".</summary>
+    [Parameter, EditorRequired]
+    public string Title { get; set; } = null!;
+
+    /// <summary>Selected subtype filter, forwarded by the page from its own query-string parameter.</summary>
+    [Parameter]
+    public string? Filter { get; set; }
+
+    private List<UserGallery> _galleries = new();
+    private List<IGrouping<string, UserGallery>> _groups = new();
+    private string _selectedKey = "All"; // All visible by default
+
+    private string AppBasePath => Configuration["AppBasePath"] ?? "/hacman/app";
+
+    private void NavigateToFilter(string? key)
+    {
+        if (key == "All")
+        {
+            NavigationManager.NavigateTo($"{AppBasePath}/{RouteSegment}");
+        }
+        else
+        {
+            var queryParams = new Dictionary<string, string?> { { "filter", key } };
+            var url = QueryHelpers.AddQueryString($"{AppBasePath}/{RouteSegment}", queryParams);
+            NavigationManager.NavigateTo(url);
+        }
+    }
+
+    private static string GetSubtypeKey(UserGallery x) => x.Gallery.Subtype.Name;
+
+    private string GetButtonClass(string key) =>
+        _selectedKey == key
+            ? "matrix-filter-btn active"
+            : "matrix-filter-btn";
+
+    protected override void OnInitialized()
+    {
+        Logger.LogInformation("=== GalleryTypePage({RouteSegment}) OnInitialized START ===", RouteSegment);
+
+        if (!string.IsNullOrEmpty(Filter))
+        {
+            _selectedKey = Filter;
+        }
+
+        UserGalleriesState.OnChange += StateHasChanged;
+        UserGalleriesState.OnChange += RefreshGroups;
+        UserGalleriesState.EnsureLoaded();
+        RefreshGroups();
+    }
+
+    public void Dispose()
+    {
+        UserGalleriesState.OnChange -= StateHasChanged;
+        UserGalleriesState.OnChange -= RefreshGroups;
+    }
+
+    protected override void OnParametersSet()
+    {
+        _selectedKey = !string.IsNullOrEmpty(Filter) ? Filter : "All";
+        RefreshGroups();
+    }
+
+    private void RefreshGroups()
+    {
+        var all = UserGalleriesState.All;
+        var groupName = Configuration[ConfigKey] ?? DefaultGroupName;
+
+        Logger.LogInformation("=== GalleryTypePage({RouteSegment}) RefreshGroups: groupName={GroupName}, totalGalleries={TotalCount} ===",
+            RouteSegment, groupName, all.Count);
+
+        // Filter by exact match OR contains (for "Type", "Type 1", etc.)
+        _galleries = all
+            .Where(x => string.Equals(x.Gallery.Type.Name, groupName, StringComparison.OrdinalIgnoreCase) ||
+                        x.Gallery.Type.Name.Contains(groupName, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(x => x.Gallery.GalleryId)
+            .ToList();
+
+        Logger.LogInformation("GalleryTypePage({RouteSegment}) filtered {FilteredCount} galleries matching '{GroupName}'",
+            RouteSegment, _galleries.Count, groupName);
+
+        // Group by subtype name and order groups by the lowest gallery id inside each group
+        _groups = _galleries
+            .GroupBy(GetSubtypeKey)
+            .OrderBy(g => g.Min(x => x.Gallery.GalleryId))
+            .ToList();
+
+        StateHasChanged();
+    }
+}

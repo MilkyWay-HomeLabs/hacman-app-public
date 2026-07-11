@@ -1,0 +1,46 @@
+# .NET
+bin/
+obj/
+/packages/
+TestResults/
+**/TestResults/
+
+# User-specific files
+*.rsuser
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# JetBrains / Rider
+.idea/
+*.sln.DotSettings.user
+_ReSharper.Caches/
+riderModule.iml
+
+# Visual Studio
+.vs/
+
+# AI / editor tooling — personal, machine-local (do not rely on a global gitignore)
+.claude/settings.local.json
+.junie/
+
+# Environment files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+**/.env
+**/.env.*
+!**/.env.example
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# AI assistant instruction files — kept local, not tracked (they held a real
+# local connection string; keep credentials out of the repo). Contributors get
+# their own copy locally; the shared docs live under each project's docs/.
+CLAUDE.md
+AGENTS.md

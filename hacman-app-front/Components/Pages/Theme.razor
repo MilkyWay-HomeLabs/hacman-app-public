@@ -1,0 +1,154 @@
+@page "/theme"
+@inject UserGalleriesState UserGalleriesState
+@inject NavigationManager NavigationManager
+@inject IConfiguration Configuration
+@using hacman_app_front.Domain
+@using hacman_app_front.Services
+@using Microsoft.AspNetCore.WebUtilities
+@implements IDisposable
+
+<h3>Themes</h3>
+
+@if (UserGalleriesState is null)
+{
+    <p>Loading...</p>
+}
+else
+{
+    <div class="mb-3">
+        <button class="@GetButtonClass("All")" @onclick="@(() => NavigateToFilter("All"))">
+            All (@(_allCount))
+        </button>
+
+        @foreach (var t in _themeGroups)
+        {
+            <button class="@GetButtonClass(t.Name)" @onclick="@(() => NavigateToFilter(t.Name))">
+                @t.Name (@t.Count)
+            </button>
+        }
+    </div>
+
+    @foreach (var g in (_selectedKey == "All" ? _groups : _groups.Where(g => g.Key == _selectedKey)))
+    {
+        var themeName = g.Key;
+
+        <section class="mb-5">
+            <h4>THEME: @themeName</h4>
+
+            @{
+                var subGroups = g.GroupBy(x => x.Gallery.Type.Name)
+                    .OrderBy(sg => sg.Key);
+            }
+
+            @foreach (var subGroup in subGroups)
+            {
+                <div class="mb-4">
+                    <h5 class="matrix-subtype-header">TYPE: @subGroup.Key</h5>
+                    <div class="d-flex flex-wrap gap-3">
+                        @foreach (var item in subGroup)
+                        {
+                            <GalleryCard Item="item" ShowSubtype="true"/>
+                        }
+                    </div>
+                </div>
+            }
+        </section>
+    }
+}
+
+@code {
+    private int _allCount;
+    private List<(string Name, int Count)> _themeGroups = new();
+    private List<UserGallery> _galleries = new();
+    private List<IGrouping<string, UserGallery>> _groups = new();
+    private string _selectedKey = "All";
+
+    [SupplyParameterFromQuery] public string? Filter { get; set; }
+
+    private string AppBasePath => Configuration["AppBasePath"] ?? "/hacman/app";
+
+    protected override void OnInitialized()
+    {
+        if (!string.IsNullOrEmpty(Filter))
+        {
+            _selectedKey = Filter;
+        }
+
+        UserGalleriesState.OnChange += StateHasChanged;
+        UserGalleriesState.OnChange += Refresh;
+        UserGalleriesState?.EnsureLoaded();
+        Refresh();
+    }
+
+    public void Dispose()
+    {
+        if (UserGalleriesState != null)
+        {
+            UserGalleriesState.OnChange -= StateHasChanged;
+            UserGalleriesState.OnChange -= Refresh;
+        }
+    }
+
+    protected override void OnParametersSet()
+    {
+        if (!string.IsNullOrEmpty(Filter))
+        {
+            _selectedKey = Filter;
+        }
+        else
+        {
+            _selectedKey = "All";
+        }
+
+        Refresh();
+    }
+
+    private void Refresh()
+    {
+        var all = UserGalleriesState?.All ?? Array.Empty<UserGallery>();
+        _allCount = all.Count;
+
+        _themeGroups = all
+            .Select(g => g.Gallery.Theme.Name)
+            .GroupBy(name => name)
+            .OrderBy(g => g.Key)
+            .Select(g => (Name: g.Key, Count: g.Count()))
+            .ToList();
+
+        _galleries = all.OrderBy(x => x.Gallery.GalleryId).ToList();
+
+        _groups = _galleries
+            .GroupBy(x => x.Gallery.Theme.Name)
+            .OrderBy(g => g.Key)
+            .ToList();
+
+        StateHasChanged();
+    }
+
+
+    private void NavigateToFilter(string? key)
+    {
+        if (key == "All")
+        {
+            NavigationManager.NavigateTo($"{AppBasePath}/theme");
+        }
+        else
+        {
+            var queryParams = new Dictionary<string, string?>
+            {
+                { "filter", key }
+            };
+            var url = QueryHelpers.AddQueryString($"{AppBasePath}/theme", queryParams);
+            NavigationManager.NavigateTo(url);
+        }
+    }
+
+    private string GetButtonClass(string key) =>
+        _selectedKey == key
+            ? "matrix-filter-btn active"
+            : "matrix-filter-btn";
+
+
+}
+
+@* Styles moved to matrix.css *@

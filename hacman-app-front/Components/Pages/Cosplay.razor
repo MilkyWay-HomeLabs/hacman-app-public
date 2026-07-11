@@ -1,0 +1,11 @@
+@page "/cosplay"
+
+<GalleryTypePage RouteSegment="cosplay"
+                 ConfigKey="HacmanDictionary:CosplayGroupName"
+                 DefaultGroupName="Cosplay"
+                 Title="Cosplay Levels"
+                 Filter="@Filter"/>
+
+@code {
+    [SupplyParameterFromQuery] public string? Filter { get; set; }
+}
