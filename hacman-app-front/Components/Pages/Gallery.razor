@@ -1,0 +1,345 @@
+@page "/gallery/{id:guid}"
+@inject UserGalleriesState UserGalleriesState
+@inject NavigationManager NavigationManager
+@inject IScoresApiService ScoresApiService
+@inject UserSessionState UserSessionState
+@inject IConfiguration Configuration
+@inject ILogger<Gallery> Logger
+@using hacman_app_front.Domain
+@using hacman_app_front.Services
+@using Microsoft.AspNetCore.WebUtilities
+@implements IDisposable
+
+@if (_gallery is null)
+{
+    <p class="matrix-status-text">INITIALIZING_ARCHIVE_DATA...</p>
+}
+else
+{
+    <div class="mb-4">
+        <button class="matrix-filter-btn" @onclick='() => NavigateToArchive()'>
+            [ BACK_TO_ARCHIVE ]
+        </button>
+    </div>
+
+    <div class="d-flex align-items-center flex-wrap gap-2 mb-3">
+        <h3 class="m-0 border-0 p-0">@_gallery.Gallery?.Title</h3>
+        @if (_gallery.Gallery?.Type != null)
+        {
+            <button class="matrix-filter-btn active ms-3"
+                    @onclick='() => NavigateToCategory(_gallery.Gallery.Type.Name, "Type")'>
+                @_gallery.Gallery.Type.Name
+            </button>
+        }
+        @if (_gallery.Gallery?.Subtype != null)
+        {
+            <button class="matrix-filter-btn"
+                    @onclick='() => NavigateToCategory(_gallery.Gallery.Subtype.Name, "Subtype")'>
+                @_gallery.Gallery.Subtype.Name
+            </button>
+        }
+        @if (_gallery.Gallery?.Theme != null)
+        {
+            <button class="matrix-filter-btn" @onclick='() => NavigateToCategory(_gallery.Gallery.Theme.Name, "Theme")'>
+                @_gallery.Gallery.Theme.Name
+            </button>
+        }
+    </div>
+
+    <div class="d-flex justify-content-between align-items-center mb-4 border-bottom border-success pb-3">
+        <div class="matrix-status-text">
+            BEST_TIME_RECORDED: <span class="text-white">@FormatTime(_gallery.BestTimeMs)</span>
+        </div>
+        <button class="matrix-btn success px-4" @onclick="ToggleScores">
+            [ @(_showScores ? "HIDE_RANKINGS" : "SCORE_RANKINGS") ]
+        </button>
+    </div>
+
+    @if (_showScores)
+    {
+        <div class="matrix-list-scores-row mb-4">
+            @if (_isLoadingScores)
+            {
+                <div class="text-center p-3">
+                    <div class="spinner-border text-success" role="status">
+                        <span class="visually-hidden">Loading scores...</span>
+                    </div>
+                </div>
+            }
+            else if (_scores == null || _scores.Count == 0)
+            {
+                <div class="alert alert-dark border-success text-success bg-black mb-0">
+                    NO DATA RECORDED IN THE ARCHIVES.
+                </div>
+            }
+            else
+            {
+                <div class="difficulty-scores-container-row">
+                    @{
+                        var difficulties = new[] { "HARD", "MEDIUM", "EASY" };
+                        var scoresByDifficulty = difficulties.ToDictionary(
+                            d => d,
+                            d => _scores.Where(s => s.Difficulty == d)
+                                .OrderBy(s => s.TimeMs)
+                                .ToList()
+                        );
+                    }
+
+                    @foreach (var difficulty in difficulties)
+                    {
+                        var diffScores = scoresByDifficulty[difficulty];
+                        <div class="difficulty-column">
+                            <table class="table table-dark table-hover matrix-table difficulty-table mb-0">
+                                <thead>
+                                <tr>
+                                    <th colspan="4" class="text-center difficulty-header">@difficulty</th>
+                                </tr>
+                                <tr>
+                                    <th>RANK</th>
+                                    <th>AGENT</th>
+                                    <th>TIME</th>
+                                    <th>DATE</th>
+                                </tr>
+                                </thead>
+                                <tbody>
+                                @if (diffScores.Count == 0)
+                                {
+                                    <tr>
+                                        <td colspan="4" class="text-center text-muted small">No scores</td>
+                                    </tr>
+                                }
+                                else
+                                {
+                                    @for (int i = 0; i < diffScores.Count; i++)
+                                    {
+                                        var s = diffScores[i];
+                                        var isCurrentUser = s.Username == UserSessionState.CurrentUser?.Username;
+                                        <tr class="@(isCurrentUser ? "matrix-row-current-user" : "")">
+                                            <td>@(i + 1)</td>
+                                            <td>@s.Username</td>
+                                            <td class="text-info">@FormatScoreTime(s.TimeMs)</td>
+                                            <td class="small">@s.AchievedAt.ToString("yyyy-MM-dd HH:mm")</td>
+                                        </tr>
+                                    }
+                                }
+                                </tbody>
+                            </table>
+                        </div>
+                    }
+                </div>
+            }
+        </div>
+    }
+
+    <div class="matrix-gallery-grid">
+        @for (int i = 1; i <= (_gallery.Gallery?.ImageCount ?? 10); i++)
+        {
+            var idx = i - 1;
+            var src = GetImageUrl(i);
+            <img src="@src"
+                 alt=""
+                 class="matrix-gallery-thumb"
+                 @onclick="(() => OpenLightbox(idx))"
+                 onerror="this.onerror=null;this.src='@MissingImageUrl';"/>
+        }
+    </div>
+
+    @if (_lightboxOpen)
+    {
+        <div class="matrix-lightbox-overlay" @onclick="CloseLightbox">
+            <div class="matrix-lightbox-content" @onclick:stopPropagation>
+                <button class="matrix-lightbox-btn matrix-lightbox-close" @onclick="CloseLightbox">✕</button>
+
+                <button class="matrix-lightbox-btn" @onclick="Prev">◀</button>
+
+                <img src="@CurrentImageUrl()" class="matrix-lightbox-image"
+                     onerror="this.onerror=null;this.src='@MissingImageUrl';" alt=""/>
+
+                <button class="matrix-lightbox-btn" @onclick="Next">▶</button>
+
+                <div class="matrix-lightbox-info">
+                    IMAGE_SEQUENCE: @(_currentIndex + 1) / @(_gallery.Gallery?.ImageCount ?? 10)
+                </div>
+            </div>
+        </div>
+    }
+}
+
+@code {
+    [Parameter] public Guid Id { get; set; }
+
+    private UserGallery? _gallery;
+
+    // lightbox state
+    private bool _lightboxOpen;
+    private int _currentIndex;
+
+    // scores state
+    private bool _showScores;
+    private bool _isLoadingScores;
+    private List<ScoreEntry>? _scores;
+
+    private string AppBasePath => Configuration["AppBasePath"] ?? "/hacman/app";
+
+    private string MissingImageUrl => $"{Configuration["HacmanResourcesUrl"]}/img/galleries/missing.jpg";
+
+    protected override void OnInitialized()
+    {
+        UserGalleriesState.OnChange += StateHasChanged;
+        UserGalleriesState.OnChange += Refresh;
+        UserGalleriesState?.EnsureLoaded();
+    }
+
+    public void Dispose()
+    {
+        if (UserGalleriesState != null)
+        {
+            UserGalleriesState.OnChange -= StateHasChanged;
+            UserGalleriesState.OnChange -= Refresh;
+        }
+    }
+
+    protected override void OnParametersSet()
+    {
+        Refresh();
+        _showScores = false;
+        _scores = null;
+    }
+
+
+    private void Refresh()
+    {
+        var all = UserGalleriesState?.All ?? Array.Empty<UserGallery>();
+        _gallery = all.FirstOrDefault(g => g.Gallery.Id == Id);
+        StateHasChanged();
+    }
+
+    private string FormatTime(long? ms)
+    {
+        if (ms == null) return "N/A";
+        return TimeSpan.FromMilliseconds(ms.Value).ToString(@"mm\:ss");
+    }
+
+    private string FormatScoreTime(long ms)
+    {
+        return TimeSpan.FromMilliseconds(ms).ToString(@"mm\:ss\.fff");
+    }
+
+    private string GetImageUrl(int n)
+    {
+        var hacmanResourcesUrl = Configuration["HacmanResourcesUrl"];
+        var gid = _gallery?.Gallery.GalleryId;
+        return $"{hacmanResourcesUrl}/img/galleries/{gid}/{n}.jpg";
+    }
+
+    private void OpenLightbox(int index)
+    {
+        _currentIndex = Math.Clamp(index, 0, (_gallery?.Gallery.ImageCount ?? 10) - 1);
+        _lightboxOpen = true;
+    }
+
+    private void CloseLightbox()
+    {
+        _lightboxOpen = false;
+    }
+
+    private void Prev()
+    {
+        var count = _gallery?.Gallery.ImageCount ?? 10;
+        _currentIndex = (_currentIndex + count - 1) % count;
+    }
+
+    private void Next()
+    {
+        var count = _gallery?.Gallery.ImageCount ?? 10;
+        _currentIndex = (_currentIndex + 1) % count;
+    }
+
+    private string CurrentImageUrl() => GetImageUrl(_currentIndex + 1);
+
+    // Maps the gallery's Type.Name to its dedicated page route ("/book"/"/character"/"/cosplay").
+    // Replaces the retired Archive catch-all page (see GalleryRouteResolver).
+    private string TypeRouteSegment =>
+        GalleryRouteResolver.ResolveRouteSegment(Configuration, _gallery?.Gallery.Type.Name, Logger);
+
+    private void NavigateToArchive()
+    {
+        NavigationManager.NavigateTo($"{AppBasePath}/{TypeRouteSegment}");
+    }
+
+    private void NavigateToCategory(string category, string kind)
+    {
+        if (kind == "Theme")
+        {
+            var queryParams = new Dictionary<string, string?>
+            {
+                { "filter", category }
+            };
+            var url = QueryHelpers.AddQueryString($"{AppBasePath}/theme", queryParams);
+            NavigationManager.NavigateTo(url);
+        }
+        else if (kind == "Type")
+        {
+            NavigationManager.NavigateTo($"{AppBasePath}/{TypeRouteSegment}");
+        }
+        else
+        {
+            var queryParams = new Dictionary<string, string?>
+            {
+                { "filter", category }
+            };
+            var url = QueryHelpers.AddQueryString($"{AppBasePath}/{TypeRouteSegment}", queryParams);
+            NavigationManager.NavigateTo(url);
+        }
+    }
+
+    private async Task ToggleScores()
+    {
+        Logger.LogInformation("[Gallery] ToggleScores called, currently showing={ShowScores}", _showScores);
+        _showScores = !_showScores;
+        if (_showScores && _scores == null && _gallery?.Gallery != null)
+        {
+            Logger.LogInformation("[Gallery] Loading scores for gallery {GalleryId}", _gallery.Gallery.Id);
+            try
+            {
+                await LoadScores();
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "[Gallery] ToggleScores failed");
+                throw;
+            }
+        }
+    }
+
+    private async Task LoadScores()
+    {
+        if (_gallery?.Gallery == null)
+        {
+            Logger.LogWarning("[Gallery] LoadScores: gallery is null, skipping");
+            return;
+        }
+
+        Logger.LogInformation("[Gallery] LoadScores started for gallery {GalleryId}", _gallery.Gallery.Id);
+        _isLoadingScores = true;
+        StateHasChanged();
+        try
+        {
+            _scores = await ScoresApiService.GetScores(_gallery.Gallery.Id);
+            Logger.LogInformation("[Gallery] LoadScores completed, received {ScoreCount} scores", _scores?.Count ?? 0);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "[Gallery] LoadScores failed for gallery {GalleryId}", _gallery.Gallery.Id);
+            throw;
+        }
+        finally
+        {
+            _isLoadingScores = false;
+            StateHasChanged();
+        }
+    }
+
+}
+
+@* Styles moved to matrix.css *@

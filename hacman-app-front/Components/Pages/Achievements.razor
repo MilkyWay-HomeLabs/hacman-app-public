@@ -1,0 +1,147 @@
+@page "/achievements"
+@inject IAchievementsApiService AchievementsApiService
+@inject ILogger<Achievements> Logger
+@using hacman_app_front.Domain
+@using hacman_app_front.Services
+
+<h3>Achievements</h3>
+
+@if (_isLoading)
+{
+    <p>Loading achievements...</p>
+}
+else
+{
+    <div class="zone-progress mb-4">
+        <div class="progress-bar-container">
+            <div class="progress-bar-fill" style="width: @(_overallPercent)%"></div>
+        </div>
+        <div class="progress-text">@_overallPercent% COMPLETE (@_totalLevels / @_maxLevels LEVELS)</div>
+    </div>
+
+    <div class="mb-3">
+        <button class="@GetButtonClass("All")" @onclick="@(() => SelectCategory("All"))">
+            All (@_achievements.Count)
+        </button>
+
+        @foreach (var c in _categoryGroups)
+        {
+            <button class="@GetButtonClass(c.Key)" @onclick="@(() => SelectCategory(c.Key))">
+                @c.Key (@c.Count())
+            </button>
+        }
+    </div>
+
+    @if (_achievements.Count == 0)
+    {
+        <div class="alert alert-dark border-success text-success bg-black mb-0">
+            NO DATA RECORDED IN THE ARCHIVES.
+        </div>
+    }
+    else
+    {
+        <div class="matrix-list-container">
+            @foreach (var a in FilteredAchievements)
+            {
+                <div class="matrix-list-row achievement-row">
+                    <div class="matrix-list-id">@a.Code</div>
+
+                    <div class="matrix-list-title achievement-title-col">
+                        @a.Name
+                        <div class="achievement-description">@a.Description</div>
+                    </div>
+
+                    <div class="achievement-level-badge">LEVEL @a.Level / 5</div>
+
+                    <div class="zone-progress achievement-progress-col">
+                        <div class="progress-bar-container">
+                            <div class="progress-bar-fill" style="width: @(GetPercent(a))%"></div>
+                        </div>
+                        <div class="progress-text">
+                            @(a.NextThreshold != null ? $"{a.Value} / {a.NextThreshold}" : $"{a.Value} — MAXED")
+                        </div>
+                    </div>
+                </div>
+            }
+        </div>
+    }
+}
+
+@code {
+    private List<AchievementProgressEntry> _achievements = new();
+    private List<IGrouping<string, AchievementProgressEntry>> _categoryGroups = new();
+    private string _selectedCategory = "All";
+    private bool _isLoading = true;
+    private int _totalLevels;
+    private int _maxLevels;
+    private int _overallPercent;
+
+    private IEnumerable<AchievementProgressEntry> FilteredAchievements =>
+        _selectedCategory == "All"
+            ? _achievements
+            : _achievements.Where(a => a.Category == _selectedCategory);
+
+    protected override async Task OnInitializedAsync()
+    {
+        Logger.LogInformation("[Achievements] OnInitializedAsync called");
+        _achievements = await AchievementsApiService.GetMyProgress();
+
+        _categoryGroups = _achievements
+            .GroupBy(a => a.Category)
+            .OrderBy(g => g.Key)
+            .ToList();
+
+        _totalLevels = _achievements.Sum(a => a.Level);
+        _maxLevels = _achievements.Count * 5;
+        _overallPercent = _maxLevels == 0 ? 0 : (int)(100.0 * _totalLevels / _maxLevels);
+
+        _isLoading = false;
+        Logger.LogInformation("[Achievements] OnInitializedAsync completed: {Count} achievements, {Percent}% overall",
+            _achievements.Count, _overallPercent);
+    }
+
+    private string GetButtonClass(string key) =>
+        _selectedCategory == key ? "matrix-filter-btn active" : "matrix-filter-btn";
+
+    private void SelectCategory(string key) => _selectedCategory = key;
+
+    private static int GetPercent(AchievementProgressEntry a)
+    {
+        var max = a.Thresholds.Length == 0 ? 0 : a.Thresholds[^1];
+        if (max <= 0) return 0;
+        return (int)Math.Min(100, 100.0 * a.Value / max);
+    }
+}
+
+<style>
+    .achievement-row {
+        align-items: flex-start;
+    }
+
+    .achievement-title-col {
+        white-space: normal;
+        overflow: visible;
+    }
+
+    .achievement-description {
+        white-space: normal;
+        color: #008800;
+        font-size: 0.75rem;
+        margin-top: 2px;
+    }
+
+    .achievement-level-badge {
+        flex: 0 0 100px;
+        color: #00ff00;
+        font-family: 'Courier New', Courier, monospace;
+        font-size: 0.8rem;
+        text-align: center;
+        align-self: center;
+    }
+
+    .achievement-progress-col {
+        flex: 2;
+        margin-bottom: 0;
+        align-self: center;
+    }
+</style>

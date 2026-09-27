@@ -1,0 +1,11 @@
+@page "/character"
+
+<GalleryTypePage RouteSegment="character"
+                 ConfigKey="HacmanDictionary:CharacterGroupName"
+                 DefaultGroupName="Character"
+                 Title="Character levels"
+                 Filter="@Filter"/>
+
+@code {
+    [SupplyParameterFromQuery] public string? Filter { get; set; }
+}

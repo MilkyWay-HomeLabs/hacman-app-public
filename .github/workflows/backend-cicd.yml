@@ -1,0 +1,159 @@
+name: Dev Backend CI/CD
+
+on:
+  push:
+    branches: [ dev ]
+
+env:
+  APP_DIR: ${{ secrets.HACMAN_BACKEND_APP_DIR }}
+  ARCHIVE_DIR: ${{ secrets.HACMAN_BACKEND_ARCHIVE_DIR }}
+  DOCKER_USER: wolf
+  DOCKER_DIR: ${{ secrets.DOCKER_TEST_DIR }}
+  DOCKER_SERVICE: ${{ secrets.HACMAN_BACKEND_DOCKER_SERVICE }}
+  DEPLOY_CHECK_URL: ${{ secrets.HACMAN_BACKEND_DEPLOY_CHECK_URL || 'https://milkyway.test/hacman/api/v1/version' }}
+
+jobs:
+  build-deploy:
+    runs-on: [ self-hosted, Linux, X64, test ]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Determine version
+        id: version
+        run: |
+          set -euo pipefail
+          SHA=$(git rev-parse --short HEAD)
+          
+          # Extract version from appsettings.json using grep/sed (avoids jq dependency)
+          APP_VER=$(grep '"Version":' hacman-app-back/appsettings.json | sed -E 's/.*"Version": "(.*)".*/\1/')
+          if [ -z "$APP_VER" ]; then APP_VER="1.0.0"; fi
+          
+          if git describe --tags --exact-match >/dev/null 2>&1; then
+            VER=$(git describe --tags --exact-match)
+            FULL_VERSION="${VER}"
+          else
+            # Use version from appsettings as base
+            FULL_VERSION="${APP_VER}-sha.${SHA}"
+          fi
+          echo "FULL_VERSION=${FULL_VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Restore (solution)
+        run: dotnet restore ./hacman-app.sln
+
+      - name: Build (solution)
+        run: dotnet build ./hacman-app.sln -c Release --no-restore
+
+      - name: Run tests
+        run: |
+          set -euo pipefail
+          shopt -s globstar || true
+          
+          # Use connection string from GitHub Secret for integration tests
+          # This allows using 'localhost' or '127.0.0.1' for tests run on the host
+          # while keeping Docker-specific names (like 'postgres-test') in the .env file.
+          CONN_STR="${{ secrets.HACMAN_BACKEND_CONNECTIONSTRINGS__DEFAULT }}"
+          
+          if [ ! -z "$CONN_STR" ]; then
+            echo "Using connection string from GitHub Secrets for tests."
+            echo "::add-mask::$CONN_STR"
+            export TEST_HACMAN_CONNECTIONSTRING="$CONN_STR"
+            export ConnectionStrings__Default="$CONN_STR"
+            echo "TEST_HACMAN_CONNECTIONSTRING=$CONN_STR" >> $GITHUB_ENV
+            echo "ConnectionStrings__Default=$CONN_STR" >> $GITHUB_ENV
+          else
+            echo "ERROR: HACMAN_BACKEND_CONNECTIONSTRINGS__DEFAULT secret is empty!"
+            exit 1
+          fi
+
+          TEST_FAILED=false
+          mkdir -p test-results
+          for proj in **/*.Tests.csproj; do
+            echo "Running tests for $proj"
+            trxfile="test-results/$(echo "$proj" | sed 's|/|_|g').trx"
+            # Explicitly pass environment variables to dotnet test
+            TEST_HACMAN_CONNECTIONSTRING="${TEST_HACMAN_CONNECTIONSTRING:-}" \
+            ConnectionStrings__Default="${ConnectionStrings__Default:-}" \
+            dotnet test "$proj" -c Release --logger "trx;LogFileName=$trxfile" || TEST_FAILED=true
+          done
+          if [ "$TEST_FAILED" = true ]; then
+            echo "One or more test projects failed"
+            exit 1
+          fi
+
+      - name: Publish backend
+        run: |
+          set -euo pipefail
+          echo "Publishing backend (FULL_VERSION=${{ steps.version.outputs.FULL_VERSION }})"
+          # Use InformationalVersion for custom strings, but keep Version semver-compatible
+          dotnet publish ./hacman-app-back/hacman-app-back.csproj -c Release -o ./publish -p:InformationalVersion=${{ steps.version.outputs.FULL_VERSION }}
+
+      - name: Prepare deploy directories
+        run: |
+          set -euo pipefail
+          if [ -z "${APP_DIR}" ]; then echo "APP_DIR is not set"; exit 1; fi
+          # Create deployment directories directly on the target machine
+          sudo mkdir -p "${APP_DIR}/latest" "${APP_DIR}/archive"
+          sudo chown -R ${DOCKER_USER}:${DOCKER_USER} "${APP_DIR}/latest" "${APP_DIR}/archive"
+
+      - name: Create archive and deploy publish
+        env:
+          FULL_VERSION: ${{ steps.version.outputs.FULL_VERSION }}
+        run: |
+          set -euo pipefail
+          echo "Listing ./publish before archive:" && ls -la ./publish || true
+          
+          # Use archive directory relative to APP_DIR
+          ARCHIVE_DIR_PATH="${APP_DIR}/archive"
+
+          BASE_NAME="hacman-back##${FULL_VERSION}.tar.gz"
+          TARGET="${ARCHIVE_DIR_PATH}/${BASE_NAME}"
+          SUFFIX=0
+          while [ -e "$TARGET" ]; do
+            SUFFIX=$((SUFFIX+1))
+            TARGET="${ARCHIVE_DIR_PATH}/hacman-back##${FULL_VERSION}_$SUFFIX.tar.gz"
+          done
+          tar -czf "$TARGET" -C ./publish .
+          echo "Archive created: $TARGET"
+          echo "Deploying to ${APP_DIR}/latest via rsync..."
+          sudo rsync -a --delete ./publish/ "${APP_DIR}/latest/"
+          sudo chown -R ${DOCKER_USER}:${DOCKER_USER} "${APP_DIR}/latest"
+          echo "Verification of ${APP_DIR}/latest content:"
+          sudo ls -la "${APP_DIR}/latest"
+
+      - name: Build Docker image
+        run: |
+          set -euo pipefail
+          if [ -z "${APP_DIR}" ]; then echo "APP_DIR is not set"; exit 1; fi
+          TAG_VER="hacman-app-back:${{ steps.version.outputs.FULL_VERSION }}"
+          TAG_LATEST="hacman-app-back:latest"
+          # Navigate to the service folder to ensure 'latest/' is available in build context
+          cd "${APP_DIR}"
+          docker build -t "$TAG_VER" -t "$TAG_LATEST" -f Dockerfile .
+
+      - name: Restart backend container (docker compose)
+        run: |
+          set -euo pipefail
+          cd "${DOCKER_DIR}"
+          # We don't use --build here because we already built the image in the previous step
+          # with the correct context and tagged it as :latest
+          docker compose up -d --force-recreate ${DOCKER_SERVICE:-hacman-app-back}
+
+      - name: Verify deployment
+        run: |
+          set -euo pipefail
+          echo "Waiting for deployed app at ${DEPLOY_CHECK_URL}..."
+          if ! timeout 60s bash -c 'until curl -k -s --fail "${DEPLOY_CHECK_URL}" > /dev/null; do echo "Waiting for app..."; sleep 5; done'; then
+            echo "App not available after 60s. Fetching container logs..."
+            cd "${DOCKER_DIR}"
+            docker compose logs --tail=100 ${DOCKER_SERVICE:-hacman-app-back}
+            exit 1
+          fi
+          echo "Deployment verified: $(curl -k -s ${DEPLOY_CHECK_URL})"
+

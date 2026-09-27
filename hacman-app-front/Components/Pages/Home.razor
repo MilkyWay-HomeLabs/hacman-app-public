@@ -1,0 +1,264 @@
+﻿@page "/"
+@inject ILocalStorageService LocalStorageService
+@inject IUserApiService UserApiService
+@inject UserGalleriesState UserGalleriesState
+@inject UserSessionState UserSessionState
+@inject NavigationManager NavigationManager
+@inject IConfiguration Configuration
+@using System.Net
+@using System.Text.Json
+@using hacman_app_front.Domain
+@using hacman_app_front.Services
+@implements IDisposable
+
+<PageTitle>Home - HACMAN ARCHIVE</PageTitle>
+
+<div class="matrix-home">
+    @if (_userName != "ANONYMOUS")
+    {
+        <h1 class="matrix-glitch" data-text="WELCOME_AGENT_@_userName.ToUpper()">WELCOME_AGENT_@_userName.ToUpper()</h1>
+
+        <div class="matrix-stats-overview mb-5">
+            <div class="row">
+                <div class="col-md-4">
+                    <div class="matrix-zone-card" @onclick='() => NavigationManager.NavigateTo(GetBookUrl())'>
+                        <div class="zone-title">[ BOOKS ]</div>
+                        <div class="zone-progress">
+                            <div class="progress-bar-container">
+                                <div class="progress-bar-fill" style="width: @(GetProgress(BookGroupNames) + "%")"></div>
+                            </div>
+                            <div class="progress-text">@GetProgress(BookGroupNames)% COMPLETE</div>
+                        </div>
+                        <div
+                            class="zone-stats">@GetCount(BookGroupNames, true) / @GetCount(BookGroupNames, false) DECRYPTED
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="matrix-zone-card" @onclick='() => NavigationManager.NavigateTo(GetCharacterUrl())'>
+                        <div class="zone-title">[ CHARACTERS ]</div>
+                        <div class="zone-progress">
+                            <div class="progress-bar-container">
+                                <div class="progress-bar-fill"
+                                     style="width: @(GetProgress(CharacterGroupNames) + "%")"></div>
+                            </div>
+                            <div class="progress-text">@GetProgress(CharacterGroupNames)% COMPLETE</div>
+                        </div>
+                        <div
+                            class="zone-stats">@GetCount(CharacterGroupNames, true) / @GetCount(CharacterGroupNames, false) DECRYPTED
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="matrix-zone-card" @onclick='() => NavigationManager.NavigateTo(GetCosplayUrl())'>
+                        <div class="zone-title">[ COSPLAY ]</div>
+                        <div class="zone-progress">
+                            <div class="progress-bar-container">
+                                <div class="progress-bar-fill"
+                                     style="width: @(GetProgress(CosplayGroupNames) + "%")"></div>
+                            </div>
+                            <div class="progress-text">@GetProgress(CosplayGroupNames)% COMPLETE</div>
+                        </div>
+                        <div
+                            class="zone-stats">@GetCount(CosplayGroupNames, true) / @GetCount(CosplayGroupNames, false) DECRYPTED
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        @if (_undiscoveredLevels.Any())
+        {
+            <div class="matrix-undiscovered-section">
+                <h4 class="matrix-type-header">PRIORITY_TARGETS: UNDISCOVERED_LEVELS</h4>
+                <div class="d-flex flex-wrap gap-3">
+                    @foreach (var item in _undiscoveredLevels)
+                    {
+                        <GalleryCard Item="item"/>
+                    }
+                </div>
+            </div>
+        }
+    }
+    else
+    {
+        <h1 class="matrix-glitch" data-text="ACCESS_RESTRICTED">ACCESS_RESTRICTED</h1>
+        <div class="matrix-zone-card p-5 text-center">
+            <div class="zone-title mb-4">IDENTIFICATION_REQUIRED</div>
+            <p class="text-success opacity-75">You are currently accessing the HACMAN_ARCHIVE as a GUEST. Most systems
+                are encrypted and inaccessible.</p>
+            <div class="mt-4">
+                <button class="matrix-btn primary px-4 py-2" @onclick="RedirectToLogin">[ INITIATE_LOGIN_SEQUENCE ]
+                </button>
+            </div>
+        </div>
+    }
+</div>
+
+@code {
+    private string _userName = "ANONYMOUS";
+    private List<UserGallery> _undiscoveredLevels = new();
+
+    private string AppBasePath => Configuration["AppBasePath"] ?? "/hacman/app";
+
+    // Comma-separated list of accepted gallery_type_enum values per group, e.g. "Type 1,Book" --
+    // lets one environment recognise several naming conventions for the same group at once (test
+    // seeds use "Type 1"/"Type 2"/"Type 3", prod uses literal "Book"/"Character"/"Cosplay").
+    private IReadOnlyList<string> BookGroupNames =>
+        GalleryRouteResolver.SplitAliases(Configuration["HacmanDictionary:BookGroupName"] ?? "Book");
+    private IReadOnlyList<string> CharacterGroupNames =>
+        GalleryRouteResolver.SplitAliases(Configuration["HacmanDictionary:CharacterGroupName"] ?? "Character");
+    private IReadOnlyList<string> CosplayGroupNames =>
+        GalleryRouteResolver.SplitAliases(Configuration["HacmanDictionary:CosplayGroupName"] ?? "Cosplay");
+
+    protected override void OnInitialized()
+    {
+        UserGalleriesState.OnChange += StateHasChanged;
+        UserGalleriesState.OnChange += RefreshData;
+
+        // If MainLayout already loaded the user into UserSessionState – use it immediately.
+        if (!string.IsNullOrEmpty(UserSessionState.CurrentUser?.Username))
+        {
+            _userName = UserSessionState.CurrentUser.Username;
+        }
+
+        RefreshData();
+    }
+
+    public void Dispose()
+    {
+        UserGalleriesState.OnChange -= StateHasChanged;
+        UserGalleriesState.OnChange -= RefreshData;
+    }
+
+    private void RefreshData()
+    {
+        _undiscoveredLevels = UserGalleriesState.All
+            .Where(g => !g.IsUnlocked)
+            .Take(5)
+            .ToList();
+        StateHasChanged();
+    }
+
+    private int GetProgress(IReadOnlyList<string> types)
+    {
+        var all = UserGalleriesState.All
+            .Where(g => types.Any(type =>
+                string.Equals(g.Gallery.Type.Name, type, StringComparison.OrdinalIgnoreCase) ||
+                g.Gallery.Type.Name.Contains(type, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+        if (!all.Any()) return 0;
+        return (int)Math.Round((double)all.Count(g => g.IsUnlocked) / all.Count * 100);
+    }
+
+    private int GetCount(IReadOnlyList<string> types, bool unlockedOnly)
+    {
+        var all = UserGalleriesState.All
+            .Where(g => types.Any(type =>
+                string.Equals(g.Gallery.Type.Name, type, StringComparison.OrdinalIgnoreCase) ||
+                g.Gallery.Type.Name.Contains(type, StringComparison.OrdinalIgnoreCase)));
+        return unlockedOnly ? all.Count(g => g.IsUnlocked) : all.Count();
+    }
+
+    // These zone cards each have a known, fixed destination page -- no need to round-trip
+    // through GalleryRouteResolver (which resolves an actual gallery's Type.Name to a route;
+    // here the route is already known statically).
+    private string GetBookUrl() => BuildTypeRouteUrl("book");
+    private string GetCharacterUrl() => BuildTypeRouteUrl("character");
+    private string GetCosplayUrl() => BuildTypeRouteUrl("cosplay");
+
+    private string BuildTypeRouteUrl(string routeSegment) =>
+        $"{AppBasePath.TrimEnd("/")}/{routeSegment}";
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            await LoadUserName();
+        }
+    }
+
+    private async Task LoadUserName()
+    {
+        // Source 1: UserSessionState – set by MainLayout (most up to date)
+        if (!string.IsNullOrEmpty(UserSessionState.CurrentUser?.Username))
+        {
+            _userName = UserSessionState.CurrentUser.Username;
+            StateHasChanged();
+            return;
+        }
+
+        // Source 2: hacmanUser in localStorage (set by app.js after bootstrap)
+        try
+        {
+            var hacmanUserJson = await LocalStorageService.GetItemAsync("hacmanUser");
+            if (!string.IsNullOrEmpty(hacmanUserJson))
+            {
+                var hacmanUser = JsonSerializer.Deserialize<HacmanUserLocalStorage>(hacmanUserJson,
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                if (!string.IsNullOrEmpty(hacmanUser?.Username))
+                {
+                    _userName = hacmanUser.Username;
+                    StateHasChanged();
+                    return;
+                }
+            }
+        }
+        catch
+        {
+            /* ignore errors during deserialization */
+        }
+
+        // Source 3: userData in localStorage (data from Nebula, key lowercase)
+        try
+        {
+            var userDataJson = await LocalStorageService.GetItemAsync("userData");
+            if (!string.IsNullOrEmpty(userDataJson))
+            {
+                var userData = JsonSerializer.Deserialize<UserData>(userDataJson,
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+                if (!string.IsNullOrEmpty(userData?.Login))
+                {
+                    _userName = userData.Login;
+                    StateHasChanged();
+                    return;
+                }
+            }
+        }
+        catch
+        {
+            /* ignore */
+        }
+
+        // Source 4: direct query to Hacman API
+        try
+        {
+            var hacmanUser = await UserApiService.GetUserByExternalAuthId();
+            if (!string.IsNullOrEmpty(hacmanUser?.Username))
+            {
+                _userName = hacmanUser.Username;
+                StateHasChanged();
+            }
+        }
+        catch (HttpRequestException ex)
+            when (ex.StatusCode == HttpStatusCode.Unauthorized || ex.StatusCode == HttpStatusCode.NotFound)
+        {
+            // Not logged or account missing - stays ANONYMOUS
+        }
+        catch
+        {
+            // Temporary network error – remains ANONYMOUS
+        }
+    }
+
+    /// <summary>DTO dla 'hacmanUser' z localStorage</summary>
+    private record HacmanUserLocalStorage(Guid Id, string? ExternalAuthId, string? Username, string? Email);
+
+    private void RedirectToLogin()
+    {
+        var loginUrl = Configuration["NebulaApi:LoginUrl"]
+                       ?? "https://milkyway.test/nebula/app/redirect?destination=Hacman";
+        NavigationManager.NavigateTo(loginUrl, forceLoad: true);
+    }
+
+}

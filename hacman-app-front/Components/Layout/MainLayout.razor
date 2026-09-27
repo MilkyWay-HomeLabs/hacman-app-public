@@ -1,0 +1,152 @@
+@using hacman_app_front.Domain
+@using hacman_app_front.Services
+@inherits LayoutComponentBase
+@inject UserBootstrapService BootstrapService
+@inject HacmanApiClientFactory ApiClientFactory
+@inject IJSRuntime JS
+@inject NavigationManager Navigation
+@inject IConfiguration Configuration
+@inject ILogger<MainLayout> Logger
+
+<div class="page">
+    @if (_currentUser != null)
+    {
+        <div class="sidebar">
+            <NavMenu/>
+        </div>
+    }
+
+    <main>
+        @if (_currentUser != null || _isLoading || !string.IsNullOrEmpty(_errorMessage))
+        {
+            <div class="top-row px-4 matrix-top-bar">
+                @if (_currentUser != null)
+                {
+                    <span class="matrix-user-info">LOGGED IN AS: <span class="text-white">@_currentUser.Username</span></span>
+                }
+                else if (_isLoading)
+                {
+                    <span class="matrix-status-text">INITIALIZING SESSION...</span>
+                }
+                else if (!string.IsNullOrEmpty(_errorMessage))
+                {
+                    <span class="matrix-error-text me-2">ERROR: @_errorMessage</span>
+                    <button class="matrix-btn primary btn-sm" @onclick="RedirectToLogin">[ LOG IN ]</button>
+                }
+            </div>
+        }
+
+        <article class="content px-4">
+            @Body
+        </article>
+
+        <footer class="matrix-footer">
+            <span
+                class="matrix-version">Version: @(Configuration["App:Version"] ?? (typeof(MainLayout).Assembly.GetName().Version?.ToString(3) ?? "1.0.0"))</span>
+            <span class="matrix-author">Author: Szymon Derleta &copy; 2026</span>
+        </footer>
+    </main>
+</div>
+
+@code {
+    private UserResponse? _currentUser;
+    private bool _isLoading = true;
+    private string? _errorMessage;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+
+        // Register JS listeners so the browser's app.js bootstrap can call back into Blazor.
+        try
+        {
+            var dotNetRef = DotNetObjectReference.Create(this);
+            await JS.InvokeVoidAsync("hacman_registerBootstrapListener", dotNetRef);
+            Logger.LogInformation("MainLayout: bootstrap JS listener registered");
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "MainLayout: failed to register bootstrap JS listener");
+        }
+
+        await LoadUserDataAsync();
+    }
+
+    private async Task LoadUserDataAsync()
+    {
+        try
+        {
+            _isLoading = true;
+            _errorMessage = null;
+            StateHasChanged();
+
+            // Capture the accessToken cookie into UserSessionState unconditionally, before the
+            // bootstrap's localStorage fast-path can return without ever touching an API-backed
+            // service. HttpContext (needed to read the cookie) is only available during this
+            // first render, so relying on whichever service happens to be resolved first leaves
+            // it unseeded whenever the fast path skips every backend call -- breaking any later
+            // page (e.g. Achievements) that's the first to construct its HttpClient afterwards,
+            // once the interactive circuit has already dropped HttpContext for good.
+            ApiClientFactory.ResolveAccessToken();
+
+            var result = await BootstrapService.LoadUserDataAsync();
+            _currentUser = result.User;
+        }
+        finally
+        {
+            _isLoading = false;
+            StateHasChanged();
+        }
+    }
+
+    /// <summary>Called from app.js when the browser-side bootstrap has resolved user/gallery data.</summary>
+    [JSInvokable]
+    public async Task ReceiveBootstrapData(string json)
+    {
+        var result = await BootstrapService.ApplyBootstrapPayloadAsync(json, _currentUser);
+        if (result.User != null)
+        {
+            _currentUser = result.User;
+            if (result.ClearError) _errorMessage = null;
+            StateHasChanged();
+        }
+    }
+
+    /// <summary>
+    /// Called from JS (app.js) when authentication fails (no tokens, redirect loop, server error).
+    /// </summary>
+    [JSInvokable]
+    public Task ReceiveAuthError(string message)
+    {
+        Logger.LogWarning("ReceiveAuthError: {Message}", message);
+        if (_currentUser == null)
+        {
+            _errorMessage = message;
+            _isLoading = false;
+            StateHasChanged();
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private void RedirectToLogin()
+    {
+        var loginUrl = Configuration["NebulaApi:LoginUrl"]
+                       ?? "https://milkyway.test/nebula/app/redirect?destination=Hacman";
+
+        Logger.LogInformation("RedirectToLogin: Current URI = {Uri}", Navigation.Uri);
+
+        // Avoid redirect loop: if already on auth/callback or nebula page, show message instead
+        if (Navigation.Uri.Contains("auth/callback") || Navigation.Uri.Contains("nebula"))
+        {
+            Logger.LogWarning("RedirectToLogin: Potential loop detected, showing message instead");
+            _errorMessage = "Detected redirect loop. Check if you are logged in to Nebula.";
+            StateHasChanged();
+            return;
+        }
+
+        Logger.LogInformation("RedirectToLogin: Redirecting to {Url}", loginUrl);
+        Navigation.NavigateTo(loginUrl, forceLoad: true);
+    }
+
+}

@@ -1,0 +1,329 @@
+@page "/scores"
+@page "/scores/{SelectedGalleryId:guid}"
+@inject UserGalleriesState UserGalleriesState
+@inject UserSessionState UserSessionState
+@inject IScoresApiService ScoresApiService
+@inject NavigationManager NavigationManager
+@inject IConfiguration Configuration
+@inject ILogger<Scores> Logger
+@using hacman_app_front.Domain
+@using hacman_app_front.Services
+@using Microsoft.AspNetCore.WebUtilities
+@implements IDisposable
+
+<h3>High Scores</h3>
+
+@if (UserGalleriesState is null)
+{
+    <p>Loading galleries...</p>
+}
+else
+{
+    <div class="mb-3">
+        <button class="@GetButtonClass("All")" @onclick="@(() => SelectType("All"))">
+            All (@_galleries.Count)
+        </button>
+
+        @foreach (var t in _typeGroups)
+        {
+            <button class="@GetButtonClass(t.Key)" @onclick="@(() => SelectType(t.Key))">
+                @t.Key (@t.Count())
+            </button>
+        }
+    </div>
+
+    @foreach (var g in (_selectedType == "All" ? _typeGroups : _typeGroups.Where(g => g.Key == _selectedType)))
+    {
+        <section class="mb-5">
+            <h4 class="matrix-type-header">TYPE: @g.Key</h4>
+
+            <div class="matrix-list-container">
+                @foreach (var item in g)
+                {
+                    var isExpanded = _expandedGalleryId == item.Gallery.Id;
+
+                    <div class="matrix-list-row" @onclick="@(() => ToggleScores(item.Gallery.Id))">
+                        <div class="matrix-list-id">#@(FormatShortId(item.Gallery.Id))</div>
+
+                        <img class="matrix-list-img @(item.IsUnlocked ? "" : "locked")"
+                             src="@GetImageUrl(item)"
+                             alt=""
+                             onerror="this.onerror=null;this.src='@MissingImageUrl';"/>
+
+                        <div class="matrix-list-title @(item.IsUnlocked ? "" : "locked")">
+                            @(item.IsUnlocked ? item.Gallery.Title : "ACCESS_DENIED")
+                        </div>
+
+                        <div class="matrix-list-best-time">
+                            BEST: @FormatTimeMs(item.BestTimeMs)
+                        </div>
+
+                        <div class="matrix-list-actions">
+                            <button class="matrix-btn success"
+                                    @onclick="@(() => ToggleScores(item.Gallery.Id))"
+                                    @onclick:stopPropagation>
+                                [ @(isExpanded ? "HIDE" : "SCORES") ]
+                            </button>
+                            <button class="matrix-btn primary" disabled="@(!item.IsUnlocked)"
+                                    @onclick="@(() => View(item.Gallery.Id))" @onclick:stopPropagation>
+                                [ VIEW ]
+                            </button>
+                            <button class="matrix-btn info" @onclick="@(() => Play(item))" @onclick:stopPropagation>
+                                [ PLAY ]
+                            </button>
+                        </div>
+                    </div>
+
+                    @if (isExpanded)
+                    {
+                        <div class="matrix-list-scores-row">
+                            @if (_isLoadingScores)
+                            {
+                                <div class="text-center p-3">
+                                    <div class="spinner-border text-success" role="status">
+                                        <span class="visually-hidden">Loading scores...</span>
+                                    </div>
+                                </div>
+                            }
+                            else if (_scores == null || _scores.Count == 0)
+                            {
+                                <div class="alert alert-dark border-success text-success bg-black mb-0">
+                                    NO DATA RECORDED IN THE ARCHIVES.
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="difficulty-scores-container">
+                                    @{
+                                        var difficulties = new[] { "HARD", "MEDIUM", "EASY" };
+                                        var scoresByDifficulty = difficulties.ToDictionary(
+                                            d => d,
+                                            d => _scores.Where(s => s.Difficulty == d)
+                                                .OrderBy(s => s.TimeMs)
+                                                .ToList()
+                                        );
+                                    }
+                                    
+                                    @foreach (var difficulty in difficulties)
+                                    {
+                                        var diffScores = scoresByDifficulty[difficulty];
+                                        <table class="table table-dark table-hover matrix-table difficulty-table mb-0">
+                                            <thead>
+                                            <tr>
+                                                <th colspan="4" class="text-center difficulty-header">@difficulty</th>
+                                            </tr>
+                                            <tr>
+                                                <th>RANK</th>
+                                                <th>AGENT</th>
+                                                <th>TIME</th>
+                                                <th>DATE</th>
+                                            </tr>
+                                            </thead>
+                                            <tbody>
+                                            @if (diffScores.Count == 0)
+                                            {
+                                                <tr>
+                                                    <td colspan="4" class="text-center text-muted small">No scores</td>
+                                                </tr>
+                                            }
+                                            else
+                                            {
+                                                @for (int i = 0; i < diffScores.Count; i++)
+                                                {
+                                                    var s = diffScores[i];
+                                                    var isCurrentUser = s.Username == UserSessionState.CurrentUser?.Username;
+                                                    <tr class="@(isCurrentUser ? "matrix-row-current-user" : "")">
+                                                        <td>@(i + 1)</td>
+                                                        <td>@s.Username</td>
+                                                        <td class="text-info">@FormatScoreTime(s.TimeMs)</td>
+                                                        <td class="small">@s.AchievedAt.ToString("yyyy-MM-dd HH:mm")</td>
+                                                    </tr>
+                                                }
+                                            }
+                                            </tbody>
+                                        </table>
+                                    }
+                                </div>
+                            }
+                        </div>
+                    }
+                }
+            </div>
+        </section>
+    }
+}
+
+@code {
+    [Parameter] public Guid? SelectedGalleryId { get; set; }
+    
+    private List<UserGallery> _galleries = new();
+    private List<IGrouping<string, UserGallery>> _typeGroups = new();
+    private string _selectedType = "All";
+
+    private List<ScoreEntry>? _scores;
+    private bool _isLoadingScores;
+    private Guid? _expandedGalleryId;
+
+    private string AppBasePath => Configuration["AppBasePath"] ?? "/hacman/app";
+    
+    private string MissingImageUrl => $"{Configuration["HacmanResourcesUrl"]}/img/galleries/missing.jpg";
+
+    protected override void OnInitialized()
+    {
+        Logger.LogInformation("[Scores] OnInitialized called");
+        UserGalleriesState.OnChange += StateHasChanged;
+        UserGalleriesState.OnChange += Refresh;
+        UserGalleriesState?.EnsureLoaded();
+        Refresh();
+    }
+
+    public void Dispose()
+    {
+        Logger.LogInformation("[Scores] Disposing");
+        if (UserGalleriesState != null)
+        {
+            UserGalleriesState.OnChange -= StateHasChanged;
+            UserGalleriesState.OnChange -= Refresh;
+        }
+    }
+
+    protected override async Task OnParametersSetAsync()
+    {
+        Logger.LogInformation("[Scores] OnParametersSetAsync called, SelectedGalleryId={SelectedGalleryId}", SelectedGalleryId);
+        Refresh();
+        if (SelectedGalleryId != null)
+        {
+            _expandedGalleryId = SelectedGalleryId;
+            Logger.LogInformation("[Scores] Auto-loading scores for SelectedGalleryId={SelectedGalleryId}", SelectedGalleryId);
+            await LoadScores(SelectedGalleryId.Value);
+        }
+    }
+
+    private void Refresh()
+    {
+        Logger.LogInformation("[Scores] Refresh() called");
+        var all = UserGalleriesState?.All ?? Array.Empty<UserGallery>();
+        _galleries = all.OrderBy(x => x.Gallery.GalleryId).ToList();
+
+        _typeGroups = _galleries
+            .GroupBy(x => x.Gallery.Type.Name)
+            .OrderBy(g => g.Key)
+            .ToList();
+
+        Logger.LogInformation("[Scores] Refresh completed: {GalleryCount} galleries grouped into {TypeCount} types", _galleries.Count, _typeGroups.Count);
+        StateHasChanged();
+    }
+
+    private async Task ToggleScores(Guid galleryId)
+    {
+        Logger.LogInformation("[Scores] ToggleScores called for galleryId={GalleryId}", galleryId);
+        if (_expandedGalleryId == galleryId)
+        {
+            _expandedGalleryId = null;
+            _scores = null;
+            Logger.LogInformation("[Scores] Collapsed gallery {GalleryId}", galleryId);
+        }
+        else
+        {
+            _expandedGalleryId = galleryId;
+            Logger.LogInformation("[Scores] Expanded gallery {GalleryId}, loading scores...", galleryId);
+            await LoadScores(galleryId);
+        }
+    }
+
+    private async Task LoadScores(Guid galleryId)
+    {
+        Logger.LogInformation("[Scores] LoadScores started for galleryId={GalleryId}", galleryId);
+        _isLoadingScores = true;
+        _scores = null;
+        StateHasChanged();
+
+        _scores = await ScoresApiService.GetScores(galleryId);
+
+        Logger.LogInformation("[Scores] LoadScores completed, received {ScoreCount} scores", _scores?.Count ?? 0);
+        _isLoadingScores = false;
+        StateHasChanged();
+    }
+
+    private string GetButtonClass(string key) =>
+        _selectedType == key
+            ? "matrix-filter-btn active"
+            : "matrix-filter-btn";
+
+    private void SelectType(string key)
+    {
+        _selectedType = key;
+    }
+
+    private string FormatTimeMs(long? ms)
+    {
+        if (ms == null) return "N/A";
+        return TimeSpan.FromMilliseconds(ms.Value).ToString(@"mm\:ss");
+    }
+
+    private string FormatScoreTime(long ms)
+    {
+        return TimeSpan.FromMilliseconds(ms).ToString(@"mm\:ss\.fff");
+    }
+
+    private string GetImageUrl(UserGallery item)
+    {
+        var hacmanResourcesUrl = Configuration["HacmanResourcesUrl"];
+        var id = item.Gallery.GalleryId;
+        var idStr = id.ToString();
+        return item.IsUnlocked
+            ? $"{hacmanResourcesUrl}/img/galleries/{idStr}/0_100.jpg"
+            : $"{hacmanResourcesUrl}/img/galleries/{idStr}/0_0.jpg";
+    }
+
+    private void View(Guid id)
+    {
+        var basePath = AppBasePath.TrimEnd('/');
+        NavigationManager.NavigateTo($"{basePath}/gallery/{id}");
+    }
+
+    private void Play(UserGallery item)
+    {
+        var id = item.Gallery.Id;
+        var title = Uri.EscapeDataString(item.Gallery.Title);
+        var hacmanGameUrl = Configuration["HacmanGameUrl"];
+
+        var queryParams = new Dictionary<string, string?>
+        {
+            { "galleryId", id.ToString() },
+            { "title", title }
+        };
+
+        var url = QueryHelpers.AddQueryString($"{hacmanGameUrl}/play", queryParams);
+        NavigationManager.NavigateTo(url, forceLoad: true);
+    }
+
+    private static string FormatShortId(Guid? g)
+    {
+        if (g == null || g == Guid.Empty) return "----";
+        var s = g.ToString()!;
+        return s.Length >= 8 ? s[..8] : s;
+    }
+}
+
+<style>
+    .difficulty-scores-container {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        gap: 1rem;
+        margin-bottom: 0;
+    }
+
+    .difficulty-table {
+        font-size: 0.95rem;
+    }
+
+    .difficulty-header {
+        background-color: #1a472a;
+        color: #00ff00;
+        font-weight: bold;
+        padding: 0.5rem !important;
+        border-bottom: 2px solid #00ff00;
+    }
+</style>
+}
